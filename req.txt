@@ -1,1 +1,10 @@
-moviepy
+moviepy==1.0.3
+decorator==4.4.2
+imageio==2.37.2
+imageio-ffmpeg==0.6.0
+numpy>=1.17.3
+pillow>=8.3.2
+proglog<=1.0.0
+python-dotenv>=0.10
+requests>=2.8.1
+tqdm>=4.11.2
