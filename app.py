@@ -1,177 +1,200 @@
+#!/usr/bin/env python3
+"""
+Karaoke Video Generator
+
+Creates karaoke videos with synchronized lyrics display.
+Optimized for performance and memory usage.
+"""
+
 import json
-import sys
-import time
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from moviepy.editor import *
+import os
 
-# Cache the font globally to avoid reloading
+# Font cache for performance
 _font_cache = {}
 
 def get_font(fontsize):
-    """Get cached font to avoid reloading"""
+    """Get cached font to avoid reloading with proper error handling"""
     if fontsize not in _font_cache:
         try:
             _font_cache[fontsize] = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", fontsize)
-        except:
+        except (OSError, IOError):
             try:
                 _font_cache[fontsize] = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", fontsize)
-            except:
+            except (OSError, IOError):
                 _font_cache[fontsize] = ImageFont.load_default()
     return _font_cache[fontsize]
 
 def draw_lyrics_on_frame(frame, words_to_show, fontsize, screen_width, screen_height, is_rtl, font):
     """Draw lyrics on a frame using PIL with optimized text outline"""
-    # Convert numpy array to PIL Image
-    img = Image.fromarray(frame.astype('uint8'))
-    draw = ImageDraw.Draw(img)
+    pil_image = Image.fromarray(frame)
+    draw = ImageDraw.Draw(pil_image)
     
-    if not words_to_show:
-        return np.array(img)
+    # Calculate text positioning
+    y_position = screen_height - 150
+    x_center = screen_width // 2
     
-    # Calculate text layout
-    y_pos = screen_height - 100
-    
-    # Calculate total width
-    spacing = 20
-    total_width = 0
-    word_widths = []
-    
+    # Process words for display
+    display_words = []
     for word_text, is_highlight in words_to_show:
-        bbox = draw.textbbox((0, 0), word_text, font=font)
-        width = bbox[2] - bbox[0]
-        word_widths.append(width)
-        total_width += width + spacing
+        color = (255, 255, 0) if is_highlight else (255, 255, 255)
+        display_words.append((word_text, color))
     
-    # Center position
-    start_x = max(10, (screen_width - total_width) / 2)
-    current_x = start_x
+    # Join words with spaces
+    full_text = ' '.join(word for word, _ in display_words)
     
-    # Draw words with simplified outline (only 8 directions instead of 25)
-    if is_rtl:
-        # RTL: draw from right to left
-        current_x = start_x + total_width
-        for (word_text, is_highlight), width in zip(words_to_show, word_widths):
-            current_x -= width
-            color = (255, 255, 0) if is_highlight else (169, 169, 169)  # Yellow or gray
-            # Draw outline in 8 directions only (faster)
-            for adj_x, adj_y in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]:
-                draw.text((current_x + adj_x, y_pos + adj_y), word_text, font=font, fill=(0, 0, 0))
-            # Draw text on top
-            draw.text((current_x, y_pos), word_text, font=font, fill=color)
-            current_x -= spacing
-    else:
-        # LTR: draw from left to right
-        for (word_text, is_highlight), width in zip(words_to_show, word_widths):
-            color = (255, 255, 0) if is_highlight else (169, 169, 169)  # Yellow or gray
-            # Draw outline in 8 directions only (faster)
-            for adj_x, adj_y in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]:
-                draw.text((current_x + adj_x, y_pos + adj_y), word_text, font=font, fill=(0, 0, 0))
-            # Draw text on top
-            draw.text((current_x, y_pos), word_text, font=font, fill=color)
-            current_x += width + spacing
+    # Calculate text size and position
+    bbox = draw.textbbox((0, 0), full_text, font=font)
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
     
-    return np.array(img)
+    x_position = x_center - text_width // 2
+    y_position = y_position - text_height // 2
+    
+    # Draw text outline for better visibility
+    outline_color = (0, 0, 0)
+    outline_width = 2
+    
+    # Draw outline
+    for dx in range(-outline_width, outline_width + 1):
+        for dy in range(-outline_width, outline_width + 1):
+            if dx != 0 or dy != 0:
+                draw.text((x_position + dx, y_position + dy), full_text, 
+                         fill=outline_color, font=font)
+    
+    # Draw main text
+    draw.text((x_position, y_position), full_text, 
+             fill=(255, 255, 255), font=font)
+    
+    return np.array(pil_image)
 
+def build_lyrics_index(segments):
+    """Build an optimized index for fast lyrics lookup by time"""
+    time_index = {}
+    
+    for segment_idx, segment in enumerate(segments):
+        segment_start = segment['start']
+        segment_end = segment['end']
+        
+        # Index by second for fast lookup
+        start_second = int(segment_start)
+        end_second = int(segment_end) + 1
+        
+        for second in range(start_second, end_second + 1):
+            if second not in time_index:
+                time_index[second] = []
+            time_index[second].append(segment_idx)
+    
+    return time_index
+
+def get_words_for_time(segments, time_index, current_time):
+    """Get words to display for current time using optimized index"""
+    words_to_show = []
+    
+    # Get current second for index lookup
+    current_second = int(current_time)
+    
+    # Get candidate segments from index
+    candidate_segments = time_index.get(current_second, [])
+    
+    # Check only relevant segments
+    for segment_idx in candidate_segments:
+        segment = segments[segment_idx]
+        segment_start = segment['start']
+        segment_end = segment['end']
+        
+        if segment_start <= current_time < segment_end:
+            # This segment is active
+            for word_data in segment.get('words', []):
+                word_text = word_data['word']
+                word_start = word_data['start']
+                word_end = word_data['end']
+                
+                # Check if word should be highlighted or just shown
+                is_highlight = word_start <= current_time < word_end
+                words_to_show.append((word_text, is_highlight))
+    
+    return words_to_show
+
+def make_frame(t, background_image, segments, time_index, fontsize, screen_width, screen_height, is_rtl, font):
+    """Generate a single frame with lyrics"""
+    # Start with background
+    frame = background_image.copy()
+    
+    # Get words for current time
+    words_to_show = get_words_for_time(segments, time_index, t)
+    
+    # Draw lyrics on frame
+    if words_to_show:
+        frame = draw_lyrics_on_frame(frame, words_to_show, fontsize, 
+                                   screen_width, screen_height, is_rtl, font)
+    
+    return frame
 
 def main(json_file, background_image, output_video, audio_file=None):
-    start_time = time.time()
-    with open(json_file, 'r', encoding='utf-8') as f:
-        data = json.load(f)
+    """Main function to create karaoke video with optimizations"""
+    print("Loading lyrics data...")
+    with open(json_file, 'r') as f:
+        lyrics_data = json.load(f)
     
-    duration = data['duration']
-    segments = data['segments']
-    is_rtl = data.get('language') == 'he'
+    segments = lyrics_data['segments']
+    duration = lyrics_data['duration']
+    language = lyrics_data.get('language', 'en')
+    is_rtl = language in ['ar', 'he', 'fa', 'ur']
     
-    # Load background image
-    bg_img = Image.open(background_image)
-    screen_width, screen_height = 1920, 1080
-    bg_img = bg_img.resize((screen_width, screen_height))
-    bg_array = np.array(bg_img)
+    print(f"Building lyrics index for {len(segments)} segments...")
+    time_index = build_lyrics_index(segments)
     
-    # Create a mapping of time -> words to display
+    print("Loading background image...")
+    background = ImageClip(background_image)
+    screen_width, screen_height = background.size
+    
+    # Set up font
     fontsize = 45
-    fps = 24
-    total_frames = int(duration * fps)
-    
-    # Get cached font once
     font = get_font(fontsize)
     
-    # Create video by drawing on each frame
-    print("Creating frames with lyrics...")
-    frames = []
+    print("Creating video generator...")
     
-    for frame_idx in range(total_frames):
-        if frame_idx % 100 == 0:
-            print(f"  Frame {frame_idx}/{total_frames}")
-        
-        current_time = frame_idx / fps
-        
-        # Start with background
-        frame = bg_array.copy()
-        
-        # Find all words that should be shown at this time
-        words_to_show = []
-        for segment in segments:
-            segment_start = segment['start']
-            segment_end = segment['end']
-            
-            if segment_start <= current_time < segment_end:
-                # This segment is active
-                for word_data in segment.get('words', []):
-                    word_text = word_data['word']
-                    word_start = word_data['start']
-                    word_end = word_data['end']
-                    
-                    # Check if word should be highlighted or just shown
-                    is_highlight = word_start <= current_time < word_end
-                    words_to_show.append((word_text, is_highlight))
-        
-        # Draw lyrics on this frame
-        if words_to_show:
-            frame = draw_lyrics_on_frame(frame, words_to_show, fontsize, screen_width, screen_height, is_rtl, font)
-        
-        frames.append(frame)
+    # Create video clip using generator function instead of storing all frames
+    def frame_generator(t):
+        return make_frame(t, background.get_frame(t), segments, time_index, 
+                         fontsize, screen_width, screen_height, is_rtl, font)
     
-    print("Creating video clip from frames...")
-    # Create video clip from frames
-    video = ImageSequenceClip(frames, fps=fps)
+    # Create video clip with generator
+    video = VideoClip(frame_generator, duration=duration)
+    
+    # Set fps
+    video = video.set_fps(24)
     
     # Add audio if provided
-    if audio_file:
-        print(f"Adding audio from {audio_file}")
+    if audio_file and os.path.exists(audio_file):
+        print("Adding audio...")
         audio = AudioFileClip(audio_file)
         video = video.set_audio(audio)
     
-    # Write video file with faster encoding
-    print(f"Writing video: {output_video}")
+    print("Writing video file...")
     video.write_videofile(
         output_video,
-        fps=fps,
         codec='libx264',
-        audio_codec=None,
-        verbose=False,
-        logger=None
+        audio_codec='aac' if audio_file else None,
+        temp_audiofile='temp-audio.m4a',
+        remove_temp=True,
+        logger=None  # Reduce output verbosity
     )
     
-    # Calculate and print elapsed time
-    end_time = time.time()
-    elapsed_time = end_time - start_time
-    hours = int(elapsed_time // 3600)
-    minutes = int((elapsed_time % 3600) // 60)
-    seconds = int(elapsed_time % 60)
-    print(f"\n✓ Video created successfully!")
-    print(f"  Total time: {hours}h {minutes}m {seconds}s")
+    print(f"Video saved to: {output_video}")
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
+    import sys
     if len(sys.argv) < 4:
-        print("Usage: python app.py lyrics.json background.jpg output.mp4 [audio.mp3]")
+        print("Usage: python app.py <lyrics.json> <background.jpg> <output.mp4> [audio.wav]")
         sys.exit(1)
     
     json_file = sys.argv[1]
-    bg_image = sys.argv[2]
-    out_video = sys.argv[3]
-    audio = sys.argv[4] if len(sys.argv) > 4 else None
+    background_image = sys.argv[2]
+    output_video = sys.argv[3]
+    audio_file = sys.argv[4] if len(sys.argv) > 4 else None
     
-    main(json_file, bg_image, out_video, audio)
+    main(json_file, background_image, output_video, audio_file)
