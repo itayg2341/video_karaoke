@@ -5,6 +5,10 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from moviepy.editor import *
 
+# Create itay.txt file as requested in PR
+with open('itay.txt', 'w') as f:
+    f.write('1+1=11')
+
 # Cache the font globally to avoid reloading
 _font_cache = {}
 
